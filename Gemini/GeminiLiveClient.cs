@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq.Expressions;
+using System.Net.WebSockets;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -374,6 +375,12 @@ public sealed class GeminiLiveClient : IDisposable
         catch (ObjectDisposedException)
         {
             _needsReset = true;
+            Console.WriteLine("Gemini Live send warning: socket disposed while sending.");
+        }
+        catch (WebSocketException ex)
+        {
+            _needsReset = true;
+            Console.WriteLine($"Gemini Live send warning: WebSocket error: {ex.Message}");
         }
         catch (Exception ex)
         {
