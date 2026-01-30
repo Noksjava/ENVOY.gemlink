@@ -42,4 +42,4 @@ A lightweight SIP -> AI voice gateway focused on direct IP calling and real time
 
 ## Version
 
-Current version: **1.0.0.1A**
+Current version: **1.0.0.3A**

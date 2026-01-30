@@ -20,6 +20,7 @@ public sealed class AppSettings
     private string _geminiModel = GeminiModelCatalog.DefaultModel;
     private string _geminiSystemPrompt = DefaultGeminiSystemPrompt;
     private string _geminiVoice = GeminiVoiceCatalog.DefaultVoice;
+    private int _sipPort = Config.SipPort;
     private bool _isFirstLaunch = true;
     private bool _suspendSave;
 
@@ -106,6 +107,23 @@ public sealed class AppSettings
         }
     }
 
+    public int SipPort
+    {
+        get => _sipPort;
+        set
+        {
+            var normalized = value;
+            if (normalized is < 1 or > 65535)
+            {
+                normalized = Config.SipPort;
+            }
+
+            if (_sipPort == normalized) return;
+            _sipPort = normalized;
+            OnChanged();
+        }
+    }
+
     public void MarkFirstLaunchComplete()
     {
         if (!_isFirstLaunch) return;
@@ -146,6 +164,10 @@ public sealed class AppSettings
             _geminiModel = state.GeminiModel ?? _geminiModel;
             _geminiSystemPrompt = state.GeminiSystemPrompt ?? _geminiSystemPrompt;
             _geminiVoice = GeminiVoiceCatalog.GetVoice(state.GeminiVoice ?? _geminiVoice).Name;
+            if (state.SipPort is > 0 and <= 65535)
+            {
+                _sipPort = state.SipPort.Value;
+            }
             _suspendSave = false;
         }
         catch
@@ -176,7 +198,8 @@ public sealed class AppSettings
                 GeminiEndpoint = _geminiEndpoint,
                 GeminiModel = _geminiModel,
                 GeminiSystemPrompt = _geminiSystemPrompt,
-                GeminiVoice = _geminiVoice
+                GeminiVoice = _geminiVoice,
+                SipPort = _sipPort
             };
             var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
@@ -207,5 +230,6 @@ public sealed class AppSettings
         public string? GeminiModel { get; set; }
         public string? GeminiSystemPrompt { get; set; }
         public string? GeminiVoice { get; set; }
+        public int? SipPort { get; set; }
     }
 }

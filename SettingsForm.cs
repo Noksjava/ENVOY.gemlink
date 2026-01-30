@@ -16,6 +16,7 @@ public sealed class SettingsForm : Form
     private readonly ComboBox _geminiVoiceComboBox;
     private readonly TextBox _geminiSystemPromptTextBox;
     private readonly Button _fetchModelsButton;
+    private readonly NumericUpDown _sipPortInput;
     private readonly Button _saveButton;
     private readonly Label _statusLabel;
     private readonly AppSettings _settings;
@@ -25,17 +26,22 @@ public sealed class SettingsForm : Form
         _settings = settings;
 
         Text = "Settings";
+        var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        if (appIcon is not null)
+        {
+            Icon = appIcon;
+        }
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(520, 380);
+        ClientSize = new Size(520, 430);
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 8,
             Padding = new Padding(16)
         };
 
@@ -156,6 +162,41 @@ public sealed class SettingsForm : Form
         geminiPanel.SetColumnSpan(_statusLabel, 2);
         geminiPanel.RowCount = 7;
 
+        var sipLabel = new Label
+        {
+            Text = "SIP",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold)
+        };
+
+        var sipPanel = new TableLayoutPanel
+        {
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            Dock = DockStyle.Top
+        };
+        sipPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        sipPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+
+        var sipPortLabel = new Label
+        {
+            Text = "Port",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left
+        };
+        _sipPortInput = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 65535,
+            Value = _settings.SipPort,
+            Width = 120,
+            Anchor = AnchorStyles.Left
+        };
+
+        sipPanel.Controls.Add(sipPortLabel, 0, 0);
+        sipPanel.Controls.Add(_sipPortInput, 1, 0);
+
         _testModeCheckBox = new CheckBox
         {
             Text = "Test mode",
@@ -191,8 +232,11 @@ public sealed class SettingsForm : Form
         layout.Controls.Add(geminiLabel, 0, 0);
         layout.Controls.Add(geminiPanel, 0, 1);
         layout.Controls.Add(new Label { Text = "", Height = 12 }, 0, 2);
-        layout.Controls.Add(_testModeCheckBox, 0, 3);
-        layout.Controls.Add(footerPanel, 0, 4);
+        layout.Controls.Add(sipLabel, 0, 3);
+        layout.Controls.Add(sipPanel, 0, 4);
+        layout.Controls.Add(new Label { Text = "", Height = 12 }, 0, 5);
+        layout.Controls.Add(_testModeCheckBox, 0, 6);
+        layout.Controls.Add(footerPanel, 0, 7);
 
         Controls.Add(layout);
 
@@ -272,5 +316,6 @@ public sealed class SettingsForm : Form
             _settings.GeminiVoice = selectedVoice.Name;
         }
         _settings.GeminiSystemPrompt = _geminiSystemPromptTextBox.Text.Trim();
+        _settings.SipPort = (int)_sipPortInput.Value;
     }
 }
