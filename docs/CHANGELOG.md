@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.0.3A
+
+- Added persistent logging to logs/lastlog.txt alongside the UI log console.
+- Hardened Gemini Live audio callback handling and validated resampler buffer sizes.
+- Kept Gemini audio buffering aligned to the expected resampler frame size.
+
+## 1.0.0.2A
+
+- Set the application icon to use misc/gemlink.ico in the build output and window chrome.
+- Reduced loose files by moving dependency DLLs into a lib subfolder with runtime resolution support.
+
 ## 1.0.0.1A
 
 - Added a Gemini voice catalog with descriptive entries for richer UI selection.

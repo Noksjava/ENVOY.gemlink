@@ -9,7 +9,10 @@ namespace SipAiGateway;
 
 public static class GeminiModelFetcher
 {
-    private static readonly HttpClient HttpClient = new();
+    private static readonly HttpClient HttpClient = new()
+    {
+        Timeout = Timeout.InfiniteTimeSpan
+    };
     private const string ModelsEndpoint = "https://generativelanguage.googleapis.com/v1beta/models";
 
     public static async Task<IReadOnlyList<string>> FetchAsync(string? apiKey, CancellationToken cancellationToken = default)

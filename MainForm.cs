@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using GenerativeAI;
@@ -14,6 +15,7 @@ public sealed class MainForm : Form
     private readonly TextBox _logBox;
     private SipGateway? _gateway;
     private bool _consoleReady;
+    private TextWriter? _logWriter;
 
     public MainForm(AppSettings settings)
     {
@@ -21,6 +23,11 @@ public sealed class MainForm : Form
         _settings.Changed += (_, _) => UpdateStatus();
 
         Text = "ENVOY.Gemlink-SIP";
+        var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        if (appIcon is not null)
+        {
+            Icon = appIcon;
+        }
         MinimumSize = new Size(900, 600);
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -65,18 +72,6 @@ public sealed class MainForm : Form
         testApiButton.Click += async (_, _) => await RunApiTestAsync(testApiButton);
         buttonsPanel.Controls.Add(testApiButton);
 
-        for (int i = 2; i <= 6; i++)
-        {
-            var button = new Button
-            {
-                Text = $"Placeholder {i}",
-                Width = 140,
-                Height = 36,
-                Enabled = false
-            };
-            buttonsPanel.Controls.Add(button);
-        }
-
         var settingsButton = new Button
         {
             Text = "Settings",
@@ -104,7 +99,11 @@ public sealed class MainForm : Form
         Controls.Add(statusPanel);
 
         Load += async (_, _) => await InitializeGatewayAsync();
-        FormClosing += (_, _) => _gateway?.Dispose();
+        FormClosing += (_, _) =>
+        {
+            _gateway?.Dispose();
+            _logWriter?.Dispose();
+        };
 
         UpdateStatus();
     }
@@ -131,13 +130,22 @@ public sealed class MainForm : Form
             }
         }
 
-        Console.SetOut(new TextBoxWriter(_logBox));
-        Console.SetError(new TextBoxWriter(_logBox));
+        var logsDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+        Directory.CreateDirectory(logsDirectory);
+        var logPath = Path.Combine(logsDirectory, "lastlog.txt");
+        var fileWriter = new StreamWriter(
+            new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+        {
+            AutoFlush = true
+        };
+        _logWriter = new TextBoxWriter(_logBox, fileWriter);
+        Console.SetOut(_logWriter);
+        Console.SetError(_logWriter);
         _consoleReady = true;
 
         Console.WriteLine("Initializing SIP gateway...");
-        Console.WriteLine($"SIP listening on {Config.LocalIp}:{Config.SipPort}");
-        Console.WriteLine($"SIP contact: sip:{Config.ContactUser}@{Config.LocalIp}:{Config.SipPort}");
+        Console.WriteLine($"SIP listening on {Config.LocalIp}:{_settings.SipPort}");
+        Console.WriteLine($"SIP contact: sip:{Config.ContactUser}@{Config.LocalIp}:{_settings.SipPort}");
         LogStatus();
 
         _gateway = new SipGateway(_settings);
@@ -228,7 +236,7 @@ public sealed class MainForm : Form
             ? "accepts any SIP caller"
             : "expected SIP endpoints only";
 
-        _statusLabel.Text = $"Status: Ready\nMode: {mode} ({modeDetail})\nListening: {Config.LocalIp}:{Config.SipPort}";
+        _statusLabel.Text = $"Status: Ready\nMode: {mode} ({modeDetail})\nListening: {Config.LocalIp}:{_settings.SipPort}";
         LogStatus();
     }
 

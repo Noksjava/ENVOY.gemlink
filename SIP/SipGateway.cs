@@ -12,6 +12,9 @@ public sealed class SipGateway : IDisposable
     private readonly SIPTransport _transport = new();
     private RtpSession? _rtpSession;
     private readonly AppSettings _settings;
+    private bool _stopping;
+    private string? _currentCallId;
+    private string? _currentToTag;
 
     public SipGateway(AppSettings settings)
     {
@@ -20,7 +23,7 @@ public sealed class SipGateway : IDisposable
 
     public void Start()
     {
-        _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, Config.SipPort)));
+        _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Any, _settings.SipPort)));
         _transport.SIPTransportRequestReceived += OnSipRequest;
 
         Console.WriteLine("SIP gateway ready.");
@@ -34,6 +37,12 @@ public sealed class SipGateway : IDisposable
 
             if (req.Method == SIPMethodsEnum.INVITE)
             {
+                if (IsReinvite(req))
+                {
+                    await HandleReinviteAsync(req).ConfigureAwait(false);
+                    return;
+                }
+
                 var offer = SdpHelper.ParseOffer(req.Body);
                 if (offer == null)
                 {
@@ -53,10 +62,12 @@ public sealed class SipGateway : IDisposable
                 // 200 OK with our SDP answer (PCMU).
                 var ok = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
                 ok.Header.To.ToTag = Ids.NewTag();
+                _currentCallId = req.Header?.CallId;
+                _currentToTag = ok.Header.To.ToTag;
 
                 ok.Header.Contact = new List<SIPContactHeader>
                 {
-                    new(null, SIPURI.ParseSIPURI($"sip:{Config.ContactUser}@{Config.LocalIp}:{Config.SipPort}"))
+                    new(null, SIPURI.ParseSIPURI($"sip:{Config.ContactUser}@{Config.LocalIp}:{_settings.SipPort}"))
                 };
 
                 ok.Header.ContentType = SDP.SDP_MIME_CONTENTTYPE;
@@ -78,8 +89,8 @@ public sealed class SipGateway : IDisposable
             else if (req.Method == SIPMethodsEnum.BYE)
             {
                 Console.WriteLine("<-- BYE (ending call).");
-                _rtpSession?.Dispose();
-                _rtpSession = null;
+                Stop();
+                ClearDialogState();
 
                 await _transport.SendResponseAsync(SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null));
             }
@@ -99,9 +110,84 @@ public sealed class SipGateway : IDisposable
         }
     }
 
+    private bool IsReinvite(SIPRequest req)
+    {
+        if (_rtpSession == null)
+        {
+            return false;
+        }
+
+        var callId = req.Header?.CallId;
+        var toTag = req.Header?.To?.ToTag;
+
+        if (string.IsNullOrWhiteSpace(callId) || string.IsNullOrWhiteSpace(toTag))
+        {
+            return false;
+        }
+
+        return string.Equals(callId, _currentCallId, StringComparison.Ordinal) &&
+               string.Equals(toTag, _currentToTag, StringComparison.Ordinal);
+    }
+
+    private async System.Threading.Tasks.Task HandleReinviteAsync(SIPRequest req)
+    {
+        var offer = SdpHelper.ParseOffer(req.Body);
+        if (offer == null)
+        {
+            var bad = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.BadRequest, null);
+            await _transport.SendResponseAsync(bad);
+            return;
+        }
+
+        var remoteRtp = new IPEndPoint(IPAddress.Parse(offer.ConnectionIp), offer.AudioPort);
+        Console.WriteLine($"Re-INVITE: updating remote RTP to {remoteRtp}.");
+
+        await _transport.SendResponseAsync(SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Trying, null));
+
+        var ok = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
+        ok.Header.To.ToTag = _currentToTag ?? ok.Header.To.ToTag;
+        ok.Header.Contact = new List<SIPContactHeader>
+        {
+            new(null, SIPURI.ParseSIPURI($"sip:{Config.ContactUser}@{Config.LocalIp}:{_settings.SipPort}"))
+        };
+        ok.Header.ContentType = SDP.SDP_MIME_CONTENTTYPE;
+        ok.Body = SdpHelper.BuildAnswer(Config.LocalIp, Config.RtpPort);
+        ok.Header.ContentLength = ok.Body.Length;
+
+        await _transport.SendResponseAsync(ok);
+        _rtpSession?.UpdateRemoteRtp(remoteRtp);
+    }
+
+    private void ClearDialogState()
+    {
+        _currentCallId = null;
+        _currentToTag = null;
+    }
+
     public void Dispose()
     {
-        _rtpSession?.Dispose();
+        Stop();
         _transport.Shutdown();
+    }
+
+    public void Stop()
+    {
+        if (_stopping)
+        {
+            return;
+        }
+
+        _stopping = true;
+        try
+        {
+            var session = _rtpSession;
+            _rtpSession = null;
+            session?.Dispose();
+            ClearDialogState();
+        }
+        finally
+        {
+            _stopping = false;
+        }
     }
 }

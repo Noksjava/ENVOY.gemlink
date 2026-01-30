@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq.Expressions;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using GenerativeAI;
 using GenerativeAI.Live;
+using Websocket.Client;
 
 namespace SipAiGateway;
 
@@ -43,7 +46,24 @@ public sealed class GeminiLiveClient : IDisposable
     private readonly EventHandler? _onConnected;
     private readonly EventHandler? _onDisconnected;
     private readonly EventHandler<ErrorEventArgs>? _onError;
+    private readonly EventHandler<ClientCreatedEventArgs>? _onClientCreated;
     private Delegate? _onAudioChunk;
+    private readonly int _geminiInputFrameSamples;
+    private readonly int _geminiOutputFrameSamples;
+    private readonly bool _resamplerConfigurationValid;
+    private readonly Channel<byte[]> _audioChunks;
+    private Task? _audioChunkTask;
+    private long _droppedAudioChunks;
+    private long _resampleFailures;
+    private readonly Channel<byte[]> _pcmuFrames;
+    private Task? _pcmuFrameTask;
+    private long _droppedPcmuFrames;
+    private long _lastActivityMs;
+    private long _lastSendMs;
+    private const int IdleTimeoutMs = 150000;
+    private const int KeepAliveIntervalMs = 20000;
+    private readonly byte[] _keepAlivePcmBytes = new byte[Config.GeminiInputSamplesPerFrame * sizeof(short)];
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     public GeminiLiveClient(
         ReadPcmHandler readPcm,
@@ -69,6 +89,8 @@ public sealed class GeminiLiveClient : IDisposable
             _connecting = false;
             _needsReset = false;
             _sentGreeting = false;
+            _lastActivityMs = Environment.TickCount64;
+            _lastSendMs = _lastActivityMs;
             Console.WriteLine("Gemini Live connected.");
         };
         _onDisconnected = (_, _) =>
@@ -76,6 +98,8 @@ public sealed class GeminiLiveClient : IDisposable
             _connected = false;
             _connecting = false;
             _needsReset = true;
+            _lastActivityMs = Environment.TickCount64;
+            _lastSendMs = 0;
             Console.WriteLine("Gemini Live disconnected.");
         };
         _onError = (_, e) =>
@@ -90,7 +114,28 @@ public sealed class GeminiLiveClient : IDisposable
 
             LogGeminiException("Gemini Live error", exception);
         };
+        _onClientCreated = (_, args) =>
+        {
+            ConfigureWebsocketClient(args.Client);
+        };
         _onAudioChunk = null;
+        _geminiInputFrameSamples = _frame16k.Length;
+        _geminiOutputFrameSamples = _frame8kFromGemini.Length * 3;
+        _resamplerConfigurationValid = ValidateResamplerBuffers();
+        _audioChunks = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(200)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
+        _pcmuFrames = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(200)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,
+            SingleReader = true,
+            SingleWriter = false
+        });
+        _lastActivityMs = Environment.TickCount64;
+        _lastSendMs = _lastActivityMs;
     }
 
     public void Start()
@@ -99,6 +144,8 @@ public sealed class GeminiLiveClient : IDisposable
         _running = true;
 
         _task = Task.Run(StreamLoop);
+        _audioChunkTask = Task.Run(ProcessAudioChunksAsync);
+        _pcmuFrameTask = Task.Run(ProcessPcmuFramesAsync);
     }
 
     public void SetVoice(string voiceName)
@@ -152,6 +199,36 @@ public sealed class GeminiLiveClient : IDisposable
 
             if (_connected)
             {
+                var nowTick = Environment.TickCount64;
+                var idleForMs = nowTick - Interlocked.Read(ref _lastActivityMs);
+
+                if (idleForMs > IdleTimeoutMs)
+                {
+                    Console.WriteLine($"Gemini Live idle for {idleForMs}ms; resetting connection.");
+                    _needsReset = true;
+                    continue;
+                }
+
+                var sinceLastSendMs = nowTick - Interlocked.Read(ref _lastSendMs);
+                if (sinceLastSendMs > KeepAliveIntervalMs)
+                {
+                    try
+                    {
+                        await SendPcmFrameAsync(_keepAlivePcmBytes).ConfigureAwait(false);
+                        Interlocked.Exchange(ref _lastSendMs, nowTick);
+                        Interlocked.Exchange(ref _lastActivityMs, nowTick);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Gemini Live keep-alive error: {ex.Message}");
+                        _connected = false;
+                        _needsReset = true;
+                    }
+                }
+            }
+
+            if (_connected)
+            {
                 if (!wasConnected)
                 {
                     reconnectDelayMs = 2000;
@@ -201,18 +278,82 @@ public sealed class GeminiLiveClient : IDisposable
                 continue;
             }
 
-            AudioResampler.Upsample2x(_frame8k, _frame16k);
-            Buffer.BlockCopy(_frame16k, 0, _pcmBytes, 0, _pcmBytes.Length);
-            await SendPcmFrameAsync(_pcmBytes).ConfigureAwait(false);
+            if (!_resamplerConfigurationValid)
+            {
+                await Task.Delay(1000, ct).ConfigureAwait(false);
+                continue;
+            }
+
+            if (!TryUpsampleFrame())
+            {
+                await Task.Delay(500, ct).ConfigureAwait(false);
+                continue;
+            }
+            try
+            {
+                await SendPcmFrameAsync(_pcmBytes).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Gemini Send Error: {ex.Message}");
+                _connected = false;
+                _needsReset = true;
+                await Task.Delay(500, ct).ConfigureAwait(false);
+            }
             filled = 0;
             sentFrames++;
+            Interlocked.Exchange(ref _lastActivityMs, Environment.TickCount64);
+            Interlocked.Exchange(ref _lastSendMs, Environment.TickCount64);
 
             var now = Environment.TickCount64;
             if (now - lastLog >= 1000)
             {
                 lastLog = now;
-                Console.WriteLine($"Gemini Live tx audio frames={sentFrames}");
+                var dropped = Interlocked.Exchange(ref _droppedAudioChunks, 0);
+                var droppedPcmu = Interlocked.Exchange(ref _droppedPcmuFrames, 0);
+                Console.WriteLine(
+                    dropped > 0 || droppedPcmu > 0
+                        ? $"Gemini Live tx audio frames={sentFrames} (dropped audio chunks={dropped}, dropped pcmu frames={droppedPcmu})"
+                        : $"Gemini Live tx audio frames={sentFrames}");
             }
+        }
+    }
+
+    private async Task ProcessAudioChunksAsync()
+    {
+        var ct = _cts.Token;
+        try
+        {
+            while (await _audioChunks.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+            {
+                while (_audioChunks.Reader.TryRead(out var buffer))
+                {
+                    HandleGeminiAudioBytes(buffer);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down.
+        }
+    }
+
+    private async Task ProcessPcmuFramesAsync()
+    {
+        var ct = _cts.Token;
+        try
+        {
+            while (await _pcmuFrames.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+            {
+                while (_pcmuFrames.Reader.TryRead(out var frame))
+                {
+                    _onPcmuFrame?.Invoke(frame);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down.
         }
     }
 
@@ -299,6 +440,10 @@ public sealed class GeminiLiveClient : IDisposable
             _liveClient.Connected += _onConnected;
             _liveClient.Disconnected += _onDisconnected;
             _liveClient.ErrorOccurred += _onError;
+            if (_onClientCreated != null)
+            {
+                _liveClient.ClientCreated += _onClientCreated;
+            }
 
             var audioEvent = _liveClient.GetType().GetEvent("AudioChunkReceived");
             if (audioEvent != null)
@@ -312,6 +457,19 @@ public sealed class GeminiLiveClient : IDisposable
         }
     }
 
+    private static void ConfigureWebsocketClient(IWebsocketClient client)
+    {
+        if (client == null)
+        {
+            return;
+        }
+
+        client.ConnectTimeout = Timeout.InfiniteTimeSpan;
+        client.IsReconnectionEnabled = false;
+        client.ReconnectTimeout = null;
+        client.ErrorReconnectTimeout = null;
+    }
+
     private void ResetLiveClient()
     {
         lock (_clientLock)
@@ -320,6 +478,7 @@ public sealed class GeminiLiveClient : IDisposable
             _sentGreeting = false;
             _connecting = false;
             _needsReset = false;
+            _lastSendMs = 0;
 
             if (_liveClient != null)
             {
@@ -338,6 +497,11 @@ public sealed class GeminiLiveClient : IDisposable
                     if (_onError != null)
                     {
                         _liveClient.ErrorOccurred -= _onError;
+                    }
+
+                    if (_onClientCreated != null)
+                    {
+                        _liveClient.ClientCreated -= _onClientCreated;
                     }
 
                     if (_onAudioChunk != null)
@@ -367,8 +531,11 @@ public sealed class GeminiLiveClient : IDisposable
             return;
         }
 
+        var acquired = false;
         try
         {
+            await _sendLock.WaitAsync(_cts.Token).ConfigureAwait(false);
+            acquired = true;
             await client.SendAudioAsync(pcmBytes)
                 .ConfigureAwait(false);
         }
@@ -376,6 +543,15 @@ public sealed class GeminiLiveClient : IDisposable
         {
             _needsReset = true;
             Console.WriteLine("Gemini Live send warning: socket disposed while sending.");
+        }
+        catch (OperationCanceledException)
+        {
+            _needsReset = true;
+        }
+        catch (SocketException ex)
+        {
+            _needsReset = true;
+            Console.WriteLine($"Gemini Live send warning: Socket error: {ex.SocketErrorCode}");
         }
         catch (WebSocketException ex)
         {
@@ -385,6 +561,13 @@ public sealed class GeminiLiveClient : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"Gemini Live send error: {ex.Message}");
+        }
+        finally
+        {
+            if (acquired)
+            {
+                _sendLock.Release();
+            }
         }
     }
 
@@ -401,11 +584,19 @@ public sealed class GeminiLiveClient : IDisposable
             return;
         }
 
+        var acquired = false;
         try
         {
+            await _sendLock.WaitAsync(_cts.Token).ConfigureAwait(false);
+            acquired = true;
             await liveClient.SentTextAsync("Hello. You are an assistant, pretend you're being called on the phone.")
                 .ConfigureAwait(false);
             _sentGreeting = true;
+            Interlocked.Exchange(ref _lastActivityMs, Environment.TickCount64);
+        }
+        catch (OperationCanceledException)
+        {
+            _needsReset = true;
         }
         catch (Exception ex)
         {
@@ -415,23 +606,53 @@ public sealed class GeminiLiveClient : IDisposable
             }
             Console.WriteLine($"Gemini Live greeting send error: {ex.Message}");
         }
+        finally
+        {
+            if (acquired)
+            {
+                _sendLock.Release();
+            }
+        }
     }
 
     public void HandleGeminiAudio(ReadOnlySpan<short> pcm16k)
     {
-        if (pcm16k.Length < Config.GeminiOutputSamplesPerFrame)
+        if (!_resamplerConfigurationValid)
         {
             return;
         }
 
-        AudioResampler.DownsampleBy3(pcm16k[..Config.GeminiOutputSamplesPerFrame], _frame8kFromGemini);
+        var requiredSourceSamples = _geminiOutputFrameSamples;
+        if (pcm16k.Length < requiredSourceSamples)
+        {
+            return;
+        }
+
+        try
+        {
+            AudioResampler.DownsampleBy3(pcm16k[..requiredSourceSamples], _frame8kFromGemini);
+        }
+        catch (ArgumentException ex)
+        {
+            _needsReset = true;
+            Console.WriteLine($"Gemini Live resample warning: {ex.Message}");
+            return;
+        }
         var pcmuFrame = new byte[Config.PayloadBytes];
         for (int i = 0; i < Config.PayloadBytes; i++)
         {
             pcmuFrame[i] = G711.Pcm16ToMuLaw(_frame8kFromGemini[i]);
         }
 
-        _onPcmuFrame?.Invoke(pcmuFrame);
+        if (_onPcmuFrame == null)
+        {
+            return;
+        }
+
+        if (!_pcmuFrames.Writer.TryWrite(pcmuFrame))
+        {
+            Interlocked.Increment(ref _droppedPcmuFrames);
+        }
     }
 
     private void HandleGeminiAudioBytes(byte[] buffer)
@@ -441,32 +662,98 @@ public sealed class GeminiLiveClient : IDisposable
             return;
         }
 
+        Interlocked.Exchange(ref _lastActivityMs, Environment.TickCount64);
         var samples = new short[buffer.Length / sizeof(short)];
         Buffer.BlockCopy(buffer, 0, samples, 0, samples.Length * sizeof(short));
 
+        List<short[]>? frames = null;
         lock (_audioLock)
         {
             _geminiAudioBuffer.AddRange(samples);
-            while (_geminiAudioBuffer.Count >= Config.GeminiOutputSamplesPerFrame)
+            while (_geminiAudioBuffer.Count >= _geminiOutputFrameSamples)
             {
-                var frame = _geminiAudioBuffer.GetRange(0, Config.GeminiOutputSamplesPerFrame);
-                _geminiAudioBuffer.RemoveRange(0, Config.GeminiOutputSamplesPerFrame);
-                HandleGeminiAudio(frame.ToArray());
+                frames ??= new List<short[]>();
+                var frame = _geminiAudioBuffer.GetRange(0, _geminiOutputFrameSamples);
+                _geminiAudioBuffer.RemoveRange(0, _geminiOutputFrameSamples);
+                frames.Add(frame.ToArray());
             }
+        }
+
+        if (frames == null)
+        {
+            return;
+        }
+
+        foreach (var frame in frames)
+        {
+            HandleGeminiAudio(frame);
+        }
+    }
+
+    private bool ValidateResamplerBuffers()
+    {
+        var valid = true;
+        if (_geminiInputFrameSamples < _frame8k.Length * 2)
+        {
+            Console.WriteLine(
+                $"Gemini Live: input resampler buffer mismatch; expected at least {_frame8k.Length * 2} samples but got {_geminiInputFrameSamples}.");
+            valid = false;
+        }
+
+        if (_geminiOutputFrameSamples != Config.GeminiOutputSamplesPerFrame)
+        {
+            Console.WriteLine(
+                $"Gemini Live: output resampler mismatch; expected {Config.GeminiOutputSamplesPerFrame} samples but got {_geminiOutputFrameSamples}.");
+            valid = false;
+        }
+
+        return valid;
+    }
+
+    private bool TryUpsampleFrame()
+    {
+        if (_frame16k.Length < _frame8k.Length * 2 || _pcmBytes.Length < _frame16k.Length * sizeof(short))
+        {
+            Console.WriteLine("Gemini Live: resampler buffer mismatch; skipping frame.");
+            return false;
+        }
+
+        try
+        {
+            AudioResampler.Upsample2x(_frame8k, _frame16k);
+            Buffer.BlockCopy(_frame16k, 0, _pcmBytes, 0, _pcmBytes.Length);
+            return true;
+        }
+        catch (ArgumentException ex)
+        {
+            _needsReset = true;
+            var failures = Interlocked.Increment(ref _resampleFailures);
+            Console.WriteLine($"Gemini Live resample error ({failures}): {ex.Message}");
+            return false;
         }
     }
 
     private void HandleAudioChunkEvent(object? sender, object? args)
     {
-        if (args == null)
+        try
         {
-            return;
-        }
+            if (args == null)
+            {
+                return;
+            }
 
-        var bufferProperty = args.GetType().GetProperty("Buffer");
-        if (bufferProperty?.GetValue(args) is byte[] buffer)
+            var bufferProperty = args.GetType().GetProperty("Buffer");
+            if (bufferProperty?.GetValue(args) is byte[] buffer)
+            {
+                if (!_audioChunks.Writer.TryWrite(buffer))
+                {
+                    Interlocked.Increment(ref _droppedAudioChunks);
+                }
+            }
+        }
+        catch (Exception ex)
         {
-            HandleGeminiAudioBytes(buffer);
+            Console.WriteLine($"[CRITICAL] Gemini Event Error: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -530,8 +817,12 @@ public sealed class GeminiLiveClient : IDisposable
         catch (Exception ex)
         {
             _connecting = false;
-            ResetLiveClient();
+            _connected = false;
+            _needsReset = true;
             Console.WriteLine($"Gemini Live connect error: {ex.Message}");
+            // Intentionally avoid any recursive connect attempts here.
+            // The outer StreamLoop handles reconnection scheduling.
+            return;
         }
     }
 
@@ -555,9 +846,15 @@ public sealed class GeminiLiveClient : IDisposable
     public void Dispose()
     {
         try { _cts.Cancel(); } catch { }
+        _audioChunks.Writer.TryComplete();
+        _pcmuFrames.Writer.TryComplete();
         try { _task?.Wait(2000); } catch { }
+        try { _audioChunkTask?.Wait(2000); } catch { }
+        try { _pcmuFrameTask?.Wait(2000); } catch { }
         ResetLiveClient();
         _task = null;
+        _audioChunkTask = null;
+        _pcmuFrameTask = null;
         _running = false;
     }
 }

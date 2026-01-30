@@ -26,6 +26,7 @@ public sealed class RtpSession : IDisposable
     private readonly GeminiLiveClient? _geminiLiveClient;
     private readonly bool _aiPatchEnabled;
     private readonly AppSettings _settings;
+    private readonly short[] _rxPcmFrame = new short[Config.SamplesPerFrame];
 
     // Reusable send packet and silence payload.
     private readonly byte[] _pkt = new byte[RtpPacket.HeaderSize + Config.PayloadBytes];
@@ -34,6 +35,7 @@ public sealed class RtpSession : IDisposable
     private ushort _seq;
     private uint _ts;
     private readonly uint _ssrc;
+    private bool _isDisposed;
 
     public RtpSession(IPEndPoint remoteRtpFromSdp, string localIp, int localRtpPort, AppSettings settings)
     {
@@ -103,36 +105,50 @@ public sealed class RtpSession : IDisposable
 
         while (!ct.IsCancellationRequested)
         {
-            // Pull a frame if available; otherwise keep silence already present.
-            if (_txFrames.Reader.TryRead(out var frame) && frame.Length == Config.PayloadBytes)
-            {
-                Buffer.BlockCopy(frame, 0, _pkt, RtpPacket.HeaderSize, Config.PayloadBytes);
-            }
-
-            RtpPacket.WriteHeader(_pkt, Config.PayloadTypePcmu, _seq, _ts, _ssrc);
-
-            // Send
-            _udp.Send(_pkt, _pkt.Length, _remoteRtp);
-
-            _seq++;
-            _ts += (uint)Config.SamplesPerFrame;
-            sent++;
-
-            // Pace 20ms
-            nextMs += Config.FrameMs;
+            // 1. Calculate timing
             long now = sw.ElapsedMilliseconds;
+            if (nextMs == 0) nextMs = now;
             long wait = nextMs - now;
-
             if (wait > 2) Thread.Sleep((int)(wait - 1));
             while (sw.ElapsedMilliseconds < nextMs) Thread.SpinWait(60);
 
-            // Log once per second
-            now = sw.ElapsedMilliseconds;
-            if (now - lastLog >= 1000)
+            nextMs += Config.FrameMs;
+
+            // 2. Prepare Packet
+            bool hasData = _txFrames.Reader.TryRead(out var payload);
+            if (hasData && payload.Length == Config.PayloadBytes)
             {
-                lastLog = now;
-                Console.WriteLine($"RTP TX ok. sent={sent} remote={_remoteRtp}");
+                Buffer.BlockCopy(payload, 0, _pkt, RtpPacket.HeaderSize, Config.PayloadBytes);
             }
+            else
+            {
+                Buffer.BlockCopy(_silence, 0, _pkt, RtpPacket.HeaderSize, Config.PayloadBytes);
+            }
+
+            // 3. Update Header
+            RtpPacket.WriteHeader(_pkt, Config.PayloadTypePcmu, _seq++, _ts, _ssrc);
+            _ts += (uint)Config.SamplesPerFrame;
+
+            // 4. Send with SAFETY
+            try
+            {
+                var remoteRtp = System.Threading.Volatile.Read(ref _remoteRtp);
+                _udp.Send(_pkt, _pkt.Length, remoteRtp);
+            }
+            catch (SocketException sex)
+            {
+                if (now - lastLog > 5000)
+                {
+                    Console.WriteLine($"RTP TX Socket Warning: {sex.SocketErrorCode}");
+                    lastLog = now;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"RTP TX Error: {ex.Message}");
+            }
+
+            sent++;
         }
     }
 
@@ -141,6 +157,7 @@ public sealed class RtpSession : IDisposable
         var ct = _cts.Token;
         long lastLog = Environment.TickCount64;
         int rx = 0;
+        var remote = new IPEndPoint(IPAddress.Any, 0);
 
         Console.WriteLine("RTP RX loop running...");
 
@@ -148,20 +165,28 @@ public sealed class RtpSession : IDisposable
         {
             try
             {
-                var remote = new IPEndPoint(IPAddress.Any, 0);
                 var buf = _udp.Receive(ref remote);
 
                 // Symmetric RTP: learn the real remote endpoint.
-                _remoteRtp = remote;
+                System.Threading.Volatile.Write(ref _remoteRtp, remote);
 
                 rx++;
 
-                if (RtpPacket.TryParse(buf, out var pt, out var payload) &&
-                    pt == Config.PayloadTypePcmu &&
-                    payload.Length >= Config.PayloadBytes)
+                if (RtpPacket.TryParse(buf, out var pt, out var payload))
                 {
-                    var payloadFrame = payload[..Config.PayloadBytes];
-                    Span<short> pcmFrame = stackalloc short[Config.SamplesPerFrame];
+                    if (pt != Config.PayloadTypePcmu)
+                    {
+                        continue;
+                    }
+
+                    if (payload.Length != Config.PayloadBytes)
+                    {
+                        Console.WriteLine($"RTP RX warning: unexpected payload size {payload.Length} bytes (expected {Config.PayloadBytes}).");
+                        continue;
+                    }
+
+                    var payloadFrame = payload;
+                    var pcmFrame = _rxPcmFrame.AsSpan();
                     G711.MuLawToPcm16(payloadFrame, pcmFrame);
                     _rxPcmBuffer.Write(pcmFrame);
 
@@ -187,19 +212,18 @@ public sealed class RtpSession : IDisposable
                     Console.WriteLine($"RTP RX ok. rx={rx} from={remote}");
                 }
             }
-            catch (SocketException ex)
-            {
-                Console.WriteLine($"RTP RX socket error: {ex.SocketErrorCode}");
-                break;
-            }
             catch (ObjectDisposedException)
             {
+                Console.WriteLine("RTP Socket closed (RxLoop ending).");
                 break;
+            }
+            catch (SocketException)
+            {
+                // Ignore temporary network glitches.
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"RTP RX error: {ex.Message}");
-                break;
+                Console.WriteLine($"RxLoop Error: {ex.Message}");
             }
         }
     }
@@ -228,12 +252,28 @@ public sealed class RtpSession : IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed)
+        {
+            return;
+        }
+        _isDisposed = true;
+
+        try { _geminiLiveClient?.Dispose(); } catch { }
         try { _cts.Cancel(); } catch { }
         try { _udp.Close(); } catch { }
-        try { _geminiLiveClient?.Dispose(); } catch { }
 
         _txThread = null;
         _rxThread = null;
+    }
+
+    public void UpdateRemoteRtp(IPEndPoint remoteRtp)
+    {
+        if (remoteRtp == null)
+        {
+            return;
+        }
+
+        System.Threading.Volatile.Write(ref _remoteRtp, remoteRtp);
     }
 
     private void EnqueueGeminiPcmuFrame(byte[] frame)

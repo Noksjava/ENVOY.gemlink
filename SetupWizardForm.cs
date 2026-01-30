@@ -24,6 +24,11 @@ public sealed class SetupWizardForm : Form
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
 
         Text = "Setup Wizard";
+        var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        if (appIcon is not null)
+        {
+            Icon = appIcon;
+        }
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

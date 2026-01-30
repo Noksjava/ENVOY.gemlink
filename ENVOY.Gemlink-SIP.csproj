@@ -8,8 +8,20 @@
     <RootNamespace>Envoy.Gemlink.Sip</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>1.0.0.1</Version>
+    <Version>1.0.0.3</Version>
+    <AssemblyVersion>1.0.0.3</AssemblyVersion>
+    <FileVersion>1.0.0.3</FileVersion>
+    <InformationalVersion>1.0.0.3A</InformationalVersion>
+    <ApplicationIcon>misc/gemlink.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <Target Name="MoveDependenciesToLib" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <DependencyAssemblies Include="$(TargetDir)*.dll" Exclude="$(TargetDir)$(AssemblyName).dll" />
+    </ItemGroup>
+    <MakeDir Directories="$(TargetDir)lib" />
+    <Move SourceFiles="@(DependencyAssemblies)" DestinationFolder="$(TargetDir)lib" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Google_GenerativeAI" Version="3.6.3" />
