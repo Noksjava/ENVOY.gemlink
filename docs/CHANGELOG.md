@@ -2,14 +2,33 @@
 
 ## 1.0.0.3A
 
+First properly working ver
+
 - Added persistent logging to logs/lastlog.txt alongside the UI log console.
 - Hardened Gemini Live audio callback handling and validated resampler buffer sizes.
 - Kept Gemini audio buffering aligned to the expected resampler frame size.
+- Added SIP port configuration
+- Added SIP re-INVITE session refresh handling
+- Added reentry-safe SIP stop handling
+- Changed RTP receive loop to reuse PCM buffer
+- Changed RTP decode to validate payload size before decode
+- Changed RTP session disposal to be guarded
+- Changed RTP receive loop to handle closed sockets
+- Changed RTP exception handling to avoid dispose loops
+- Added Gemini Live keep-alive, audio chunk queue, connection recycling, idle reset, websocket send serialization / resample failure counter
+- Changed Gemini resampling paths to be hardened, audio handling to decouple PCMU output
+- Changed websocket handling to fix thread safety issues
+- Changed connect error handling to avoid client reset
+- Changed connection sync to avoid recursive calls
+- Disabled HTTP timeout for Gemini Live
+- Disabled websocket connect timeout for Gemini Live
+- Fixed 100-second timeout issue
 
 ## 1.0.0.2A
 
 - Set the application icon to use misc/gemlink.ico in the build output and window chrome.
 - Reduced loose files by moving dependency DLLs into a lib subfolder with runtime resolution support.
+- Not working beyond 1m37s for now, issue not clear.
 
 ## 1.0.0.1A
 
