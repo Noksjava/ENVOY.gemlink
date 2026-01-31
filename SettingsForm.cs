@@ -17,6 +17,8 @@ public sealed class SettingsForm : Form
     private readonly TextBox _geminiSystemPromptTextBox;
     private readonly Button _fetchModelsButton;
     private readonly NumericUpDown _sipPortInput;
+    private readonly CheckBox _autoLaunchCheckBox;
+    private readonly CheckBox _launchInTrayCheckBox;
     private readonly Button _saveButton;
     private readonly Label _statusLabel;
     private readonly AppSettings _settings;
@@ -35,14 +37,15 @@ public sealed class SettingsForm : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        ClientSize = new Size(520, 430);
+        ClientSize = new Size(520, 480);
 
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 8,
-            Padding = new Padding(16)
+            RowCount = 11,
+            Padding = new Padding(16),
+            AutoScroll = true
         };
 
         var geminiLabel = new Label
@@ -197,6 +200,38 @@ public sealed class SettingsForm : Form
         sipPanel.Controls.Add(sipPortLabel, 0, 0);
         sipPanel.Controls.Add(_sipPortInput, 1, 0);
 
+        var startupLabel = new Label
+        {
+            Text = "Startup",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold)
+        };
+
+        var startupPanel = new TableLayoutPanel
+        {
+            ColumnCount = 1,
+            RowCount = 2,
+            AutoSize = true,
+            Dock = DockStyle.Top
+        };
+
+        _autoLaunchCheckBox = new CheckBox
+        {
+            Text = "Launch at Windows startup",
+            Checked = _settings.AutoLaunchEnabled,
+            AutoSize = true
+        };
+
+        _launchInTrayCheckBox = new CheckBox
+        {
+            Text = "Launch in system tray",
+            Checked = _settings.LaunchInTray,
+            AutoSize = true
+        };
+
+        startupPanel.Controls.Add(_autoLaunchCheckBox, 0, 0);
+        startupPanel.Controls.Add(_launchInTrayCheckBox, 0, 1);
+
         _testModeCheckBox = new CheckBox
         {
             Text = "Test mode",
@@ -235,8 +270,11 @@ public sealed class SettingsForm : Form
         layout.Controls.Add(sipLabel, 0, 3);
         layout.Controls.Add(sipPanel, 0, 4);
         layout.Controls.Add(new Label { Text = "", Height = 12 }, 0, 5);
-        layout.Controls.Add(_testModeCheckBox, 0, 6);
-        layout.Controls.Add(footerPanel, 0, 7);
+        layout.Controls.Add(startupLabel, 0, 6);
+        layout.Controls.Add(startupPanel, 0, 7);
+        layout.Controls.Add(new Label { Text = "", Height = 12 }, 0, 8);
+        layout.Controls.Add(_testModeCheckBox, 0, 9);
+        layout.Controls.Add(footerPanel, 0, 10);
 
         Controls.Add(layout);
 
@@ -254,6 +292,10 @@ public sealed class SettingsForm : Form
         _geminiSystemPromptTextBox.Enabled = canEditGemini;
         _fetchModelsButton.Enabled = canEditGemini;
         _statusLabel.Enabled = canEditGemini;
+        if (canEditGemini)
+        {
+            _statusLabel.Text = string.Empty;
+        }
     }
 
     private async Task LoadModelsAsync()
@@ -317,5 +359,7 @@ public sealed class SettingsForm : Form
         }
         _settings.GeminiSystemPrompt = _geminiSystemPromptTextBox.Text.Trim();
         _settings.SipPort = (int)_sipPortInput.Value;
+        _settings.AutoLaunchEnabled = _autoLaunchCheckBox.Checked;
+        _settings.LaunchInTray = _launchInTrayCheckBox.Checked;
     }
 }
