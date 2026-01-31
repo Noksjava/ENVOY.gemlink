@@ -37,7 +37,6 @@ A lightweight SIP -> AI (Gemini) voice gateway focused on direct IP calling and 
 - Improve latency tuning and add optional jitter buffering.
 - Support multiple concurrent calls and optional codecs beyond PCMU.
 - Support more API proviers.
-- Improve latency / quality / etc.
 - Fix buffering bugs.
 
 ## Version
