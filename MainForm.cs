@@ -13,6 +13,7 @@ public sealed class MainForm : Form
     private readonly AppSettings _settings;
     private readonly Label _statusLabel;
     private readonly TextBox _logBox;
+    private readonly NotifyIcon _trayIcon;
     private SipGateway? _gateway;
     private bool _consoleReady;
     private TextWriter? _logWriter;
@@ -20,7 +21,7 @@ public sealed class MainForm : Form
     public MainForm(AppSettings settings)
     {
         _settings = settings;
-        _settings.Changed += (_, _) => UpdateStatus();
+        _settings.Changed += (_, _) => HandleSettingsChanged();
 
         Text = "ENVOY.Gemlink-SIP";
         var appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -94,17 +95,39 @@ public sealed class MainForm : Form
             ForeColor = Color.LightGreen
         };
 
+        _trayIcon = new NotifyIcon
+        {
+            Icon = Icon,
+            Visible = false,
+            Text = "ENVOY.Gemlink-SIP"
+        };
+
+        var trayMenu = new ContextMenuStrip();
+        var showItem = new ToolStripMenuItem("Show");
+        showItem.Click += (_, _) => ShowFromTray();
+        var exitItem = new ToolStripMenuItem("Exit");
+        exitItem.Click += (_, _) => ExitFromTray();
+        trayMenu.Items.Add(showItem);
+        trayMenu.Items.Add(exitItem);
+        _trayIcon.ContextMenuStrip = trayMenu;
+        _trayIcon.DoubleClick += (_, _) => ShowFromTray();
+
         Controls.Add(_logBox);
         Controls.Add(leftPanel);
         Controls.Add(statusPanel);
 
         Load += async (_, _) => await InitializeGatewayAsync();
+        Shown += (_, _) => ApplyLaunchInTray();
+        Resize += (_, _) => HandleResizeToTray();
         FormClosing += (_, _) =>
         {
             _gateway?.Dispose();
             _logWriter?.Dispose();
+            _trayIcon.Visible = false;
+            _trayIcon.Dispose();
         };
 
+        ApplyAutoLaunch();
         UpdateStatus();
     }
 
@@ -253,6 +276,67 @@ public sealed class MainForm : Form
             : "expected SIP endpoints only";
 
         Console.WriteLine($"Mode: {mode} ({modeDetail})");
+    }
+
+    private void HandleSettingsChanged()
+    {
+        UpdateStatus();
+        ApplyAutoLaunch();
+        if (!_settings.LaunchInTray)
+        {
+            ShowFromTray();
+        }
+        else
+        {
+            ApplyLaunchInTray();
+        }
+    }
+
+    private void ApplyAutoLaunch()
+    {
+        AutoLaunchManager.Apply(_settings.AutoLaunchEnabled);
+    }
+
+    private void ApplyLaunchInTray()
+    {
+        if (_settings.LaunchInTray)
+        {
+            HideToTray();
+        }
+        else
+        {
+            ShowFromTray();
+        }
+    }
+
+    private void HandleResizeToTray()
+    {
+        if (_settings.LaunchInTray && WindowState == FormWindowState.Minimized)
+        {
+            HideToTray();
+        }
+    }
+
+    private void HideToTray()
+    {
+        _trayIcon.Visible = true;
+        Hide();
+        ShowInTaskbar = false;
+    }
+
+    private void ShowFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+        _trayIcon.Visible = false;
+    }
+
+    private void ExitFromTray()
+    {
+        _trayIcon.Visible = false;
+        Close();
     }
 
     private void ShowSettings()

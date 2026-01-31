@@ -15,6 +15,8 @@ public sealed class SetupWizardForm : Form
     private readonly ComboBox _voiceComboBox;
     private readonly TextBox _systemPromptTextBox;
     private readonly CheckBox _testModeCheckBox;
+    private readonly CheckBox _autoLaunchCheckBox;
+    private readonly CheckBox _launchInTrayCheckBox;
     private readonly Label _statusLabel;
     private readonly Button _fetchButton;
     private readonly Button _saveButton;
@@ -39,7 +41,7 @@ public sealed class SetupWizardForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 8,
+            RowCount = 11,
             Padding = new Padding(16)
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -47,7 +49,7 @@ public sealed class SetupWizardForm : Form
 
         var introLabel = new Label
         {
-            Text = "Welcome! Configure Gemini access or stay in TEST mode.",
+            Text = "Configure Gemini access / test mode",
             AutoSize = true
         };
         layout.Controls.Add(introLabel, 0, 0);
@@ -130,20 +132,47 @@ public sealed class SetupWizardForm : Form
         layout.Controls.Add(voiceLabel, 0, 5);
         layout.Controls.Add(_voiceComboBox, 1, 5);
 
+        var startupLabel = new Label
+        {
+            Text = "Startup",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold)
+        };
+        layout.Controls.Add(startupLabel, 0, 6);
+        layout.SetColumnSpan(startupLabel, 2);
+
+        _autoLaunchCheckBox = new CheckBox
+        {
+            Text = "Launch at Windows startup",
+            Checked = _settings.AutoLaunchEnabled,
+            AutoSize = true
+        };
+        layout.Controls.Add(_autoLaunchCheckBox, 0, 7);
+        layout.SetColumnSpan(_autoLaunchCheckBox, 2);
+
+        _launchInTrayCheckBox = new CheckBox
+        {
+            Text = "Launch in system tray",
+            Checked = _settings.LaunchInTray,
+            AutoSize = true
+        };
+        layout.Controls.Add(_launchInTrayCheckBox, 0, 8);
+        layout.SetColumnSpan(_launchInTrayCheckBox, 2);
+
         _fetchButton = new Button
         {
             Text = "Fetch Models",
             Width = 120
         };
         _fetchButton.Click += async (_, _) => await LoadModelsAsync();
-        layout.Controls.Add(_fetchButton, 1, 6);
+        layout.Controls.Add(_fetchButton, 1, 9);
 
         _statusLabel = new Label
         {
             AutoSize = true,
             ForeColor = Color.DimGray
         };
-        layout.Controls.Add(_statusLabel, 0, 7);
+        layout.Controls.Add(_statusLabel, 0, 10);
         layout.SetColumnSpan(_statusLabel, 2);
 
         var footerPanel = new FlowLayoutPanel
@@ -188,6 +217,10 @@ public sealed class SetupWizardForm : Form
         _voiceComboBox.Enabled = !testMode;
         _systemPromptTextBox.Enabled = !testMode;
         _fetchButton.Enabled = !testMode;
+        if (!testMode)
+        {
+            _statusLabel.Text = string.Empty;
+        }
     }
 
     private async Task LoadModelsAsync()
@@ -249,5 +282,7 @@ public sealed class SetupWizardForm : Form
             _settings.GeminiVoice = selectedVoice.Name;
         }
         _settings.GeminiSystemPrompt = _systemPromptTextBox.Text.Trim();
+        _settings.AutoLaunchEnabled = _autoLaunchCheckBox.Checked;
+        _settings.LaunchInTray = _launchInTrayCheckBox.Checked;
     }
 }
