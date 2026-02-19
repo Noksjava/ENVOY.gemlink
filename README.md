@@ -1,6 +1,6 @@
 # ENVOY.Gemlink-SIP
 
-A lightweight SIP -> AI (Gemini) voice gateway focused on direct IP calling and real time audio bridging. A SIP endpoint to answer INVITEs, negotiate RTP via SDP and stream PCMU audio over RTP.
+A lightweight SIP -> AI (Gemini) voice gateway / SIP endpoint to answer INVITEs, negotiate RTP via SDP and stream PCMU audio over RTP.
 
 ## What it does
 
